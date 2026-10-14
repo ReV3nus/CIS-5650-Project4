@@ -10,13 +10,14 @@ WebGPU Forward+ and Clustered Deferred Shading
 
 [![](img/sponza_deferred.jpg)](https://rev3nus.github.io/CIS-5650-Project4/)
 
-**https://rev3nus.github.io/CIS-5650-Project4/** (needs a WebGPU browser; Chrome works best)
+**https://rev3nus.github.io/CIS-5650-Project4/** 
 
-### Demo Video/GIF
+### Demo Video
 
-[![demo video](img/demo_thumb.jpg)](img/demo.mp4)
 
-[`img/demo.mp4`](img/demo.mp4) (43 s): render modes, debug views, toon shading and the optimization toggles.
+https://github.com/user-attachments/assets/e65d3443-fcfb-46ed-b0b0-3fddab3a028d
+
+(43 s): render modes, debug views, toon shading and the optimization toggles.
 
 ---
 
