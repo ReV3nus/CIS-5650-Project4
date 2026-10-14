@@ -2,6 +2,11 @@ import { Scene } from './stage/scene';
 import { Lights } from './stage/lights';
 import { Camera } from './stage/camera';
 import { Stage } from './stage/stage';
+import { GpuProfiler } from './profiler';
+import { ToonPostProcess } from './postprocess';
+import * as shaders from './shaders/shaders';
+import { settings, postProcessModes, clusterCullingModes } from './settings';
+import { ClusterCulling } from './stage/cluster_culling';
 
 export var canvas: HTMLCanvasElement;
 export var canvasFormat: GPUTextureFormat;
@@ -23,6 +28,13 @@ export async function initWebGPU() {
     canvas.width = canvas.clientWidth * devicePixelRatio;
     canvas.height = canvas.clientHeight * devicePixelRatio;
 
+    // e.g. ?resolution=1920x1080 for benchmarks
+    const resolution = new URLSearchParams(window.location.search).get('resolution')?.match(/^(\d+)x(\d+)$/);
+    if (resolution) {
+        canvas.width = parseInt(resolution[1]);
+        canvas.height = parseInt(resolution[2]);
+    }
+
     aspectRatio = canvas.width / canvas.height;
 
     if (!navigator.gpu)
@@ -41,13 +53,19 @@ export async function initWebGPU() {
         throw new Error("no appropriate GPUAdapter found");
     }
 
-    device = await adapter.requestDevice();
+    device = await adapter.requestDevice({
+        requiredFeatures: adapter.features.has('timestamp-query') ? ['timestamp-query'] : []
+    });
+    device.lost.then(info => console.error(`WebGPU device lost (${info.reason}): ${info.message}`));
+    device.addEventListener('uncapturederror', event => console.error('WebGPU error:', event.error.message));
 
     context = canvas.getContext("webgpu")!;
-    canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+    // rgba8unorm so compute passes can write to the canvas
+    canvasFormat = "rgba8unorm";
     context.configure({
         device: device,
         format: canvasFormat,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.STORAGE_BINDING
     });
 
     console.log("WebGPU init successsful");
@@ -108,6 +126,13 @@ export abstract class Renderer {
 
     protected stats: Stats;
 
+    readonly profiler = new GpuProfiler();
+
+    private postProcess: ToonPostProcess | undefined;
+
+    protected clusterCullingMode: string = clusterCullingModes.off;
+    private clusterCulling: ClusterCulling | undefined;
+
     private prevTime: number = 0;
     private frameRequestId: number;
 
@@ -126,6 +151,78 @@ export abstract class Renderer {
 
     protected abstract draw(): void;
 
+    protected initPostProcess(depthTextureView: GPUTextureView) {
+        if (settings.postProcess === postProcessModes.toon) {
+            this.postProcess = new ToonPostProcess(this.camera, depthTextureView);
+        }
+    }
+
+    protected initClusterCulling(depthTextureView: GPUTextureView, mode: string = settings.clusterCulling) {
+        this.clusterCullingMode = mode;
+        if (mode !== clusterCullingModes.off) {
+            this.clusterCulling = new ClusterCulling(this.lights, this.camera, depthTextureView);
+        }
+    }
+
+    // with culling on, call after the depth buffer is filled
+    protected cullAndClusterLights(encoder: GPUCommandEncoder) {
+        if (this.clusterCulling) {
+            const compact = this.clusterCullingMode === clusterCullingModes.compact;
+            this.clusterCulling.run(encoder, compact,
+                this.profiler.timestampWrites("cullMark"),
+                compact ? this.profiler.timestampWrites("cullCompact") : undefined);
+        }
+        this.lights.doLightClustering(encoder, this.profiler.timestampWrites("clustering"), this.clusterCullingMode);
+    }
+
+    // offscreen texture when post-processing
+    protected getColorTargetView(): GPUTextureView {
+        return this.postProcess?.inputTextureView ?? context.getCurrentTexture().createView();
+    }
+
+    protected runPostProcess(encoder: GPUCommandEncoder) {
+        this.postProcess?.run(encoder, context.getCurrentTexture().createView(), this.profiler.timestampWrites("post"));
+    }
+
+    private encodeSceneDraws(pass: GPURenderPassEncoder | GPURenderBundleEncoder,
+                             pipeline: GPURenderPipeline, sceneBindGroup: GPUBindGroup) {
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(shaders.constants.bindGroup_scene, sceneBindGroup);
+
+        this.scene.iterate(node => {
+            pass.setBindGroup(shaders.constants.bindGroup_model, node.modelBindGroup);
+        }, material => {
+            pass.setBindGroup(shaders.constants.bindGroup_material, material.materialBindGroup);
+        }, primitive => {
+            pass.setVertexBuffer(0, primitive.vertexBuffer);
+            pass.setIndexBuffer(primitive.indexBuffer, 'uint32');
+            pass.drawIndexed(primitive.numIndices);
+        });
+    }
+
+    protected createSceneBundle(pipeline: GPURenderPipeline, sceneBindGroup: GPUBindGroup,
+                                colorFormats: GPUTextureFormat[], depthStencilFormat: GPUTextureFormat) {
+        if (!settings.renderBundles) {
+            return undefined;
+        }
+        const bundleEncoder = device.createRenderBundleEncoder({
+            label: "scene render bundle",
+            colorFormats: colorFormats,
+            depthStencilFormat: depthStencilFormat
+        });
+        this.encodeSceneDraws(bundleEncoder, pipeline, sceneBindGroup);
+        return bundleEncoder.finish();
+    }
+
+    protected drawScene(pass: GPURenderPassEncoder, pipeline: GPURenderPipeline, sceneBindGroup: GPUBindGroup,
+                        bundle: GPURenderBundle | undefined) {
+        if (bundle) {
+            pass.executeBundles([bundle]);
+        } else {
+            this.encodeSceneDraws(pass, pipeline, sceneBindGroup);
+        }
+    }
+
     // CHECKITOUT: this is the main rendering loop
     private onFrame(time: number) {
         if (this.prevTime == 0) {
@@ -138,7 +235,11 @@ export abstract class Renderer {
 
         this.stats.begin();
 
+        this.profiler.beginFrame();
+        const cpuStart = performance.now();
         this.draw();
+        this.profiler.record("cpu", performance.now() - cpuStart);
+        this.profiler.readback();
 
         this.stats.end();
 

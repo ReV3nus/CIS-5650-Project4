@@ -39,11 +39,13 @@ export class Material {
     readonly id: number;
 
     materialBindGroup: GPUBindGroup;
+    diffuseTexture: GPUTexture;
 
     constructor(gltfMaterial: GLTFMaterial, textures: Texture[]) {
         this.id = Material.nextId++;
 
         const diffuseTexture = textures[gltfMaterial.pbrMetallicRoughness!.baseColorTexture!.index];
+        this.diffuseTexture = diffuseTexture.image;
 
         this.materialBindGroup = device.createBindGroup({
             label: "material bind group",
@@ -117,14 +119,14 @@ export class Primitive {
         this.indexBuffer = device.createBuffer({
             label: "index buffer",
             size: indicesArray.byteLength,
-            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
         });
         device.queue.writeBuffer(this.indexBuffer, 0, indicesArray);
 
         this.vertexBuffer = device.createBuffer({
             label: "vertex buffer",
             size: vertsArray.byteLength,
-            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
         });
         device.queue.writeBuffer(this.vertexBuffer, 0, vertsArray);
 
